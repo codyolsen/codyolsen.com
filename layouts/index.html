@@ -42,22 +42,69 @@
 
     .hint.hidden { opacity: 0; }
 
-    .drag-line {
+    #debug {
       position: fixed;
+      bottom: 8px;
+      left: 12px;
+      color: rgba(255, 255, 255, 0.4);
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 11px;
+      line-height: 1.5;
       pointer-events: none;
-      z-index: 5;
+      z-index: 10;
+      white-space: pre;
+    }
+
+    #sliders {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.5);
+    }
+
+    #sliders label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #sliders span {
+      min-width: 56px;
+    }
+
+    #sliders input[type="range"] {
+      width: 120px;
+      accent-color: rgba(255, 255, 255, 0.4);
+    }
+
+    #sliders .val {
+      min-width: 44px;
+      text-align: right;
     }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <div class="hint" id="hint">click &amp; drag to launch</div>
+  <div id="debug"></div>
+  <div id="sliders">
+    <label><span>gravity</span><input type="range" id="sl-gravity" min="0" max="100" value="8"><span class="val" id="val-gravity">0.08</span></label>
+    <label><span>bounce</span><input type="range" id="sl-bounce" min="0" max="100" value="92"><span class="val" id="val-bounce">0.92</span></label>
+    <label><span>friction</span><input type="range" id="sl-friction" min="0" max="100" value="70"><span class="val" id="val-friction">0.997</span></label>
+  </div>
 
   <script>
   (() => {
     const canvas = document.getElementById('c');
     const ctx = canvas.getContext('2d');
     const hint = document.getElementById('hint');
+    const debug = document.getElementById('debug');
     let W, H, dpr;
 
     function resize() {
@@ -74,22 +121,308 @@
     window.addEventListener('resize', resize);
     resize();
 
-    const GRAVITY = 0.45;
-    const BOUNCE = 0.72;
-    const FRICTION = 0.998;
+    let GRAVITY = 0.08;
+    let BOUNCE = 0.92;
+    let FRICTION = 0.997;
+
+    document.getElementById('sl-gravity').addEventListener('input', (e) => {
+      GRAVITY = e.target.value / 1000;
+      document.getElementById('val-gravity').textContent = GRAVITY.toFixed(3);
+    });
+    document.getElementById('sl-bounce').addEventListener('input', (e) => {
+      BOUNCE = e.target.value / 100;
+      document.getElementById('val-bounce').textContent = BOUNCE.toFixed(2);
+    });
+    document.getElementById('sl-friction').addEventListener('input', (e) => {
+      FRICTION = 0.99 + (e.target.value / 100) * 0.01;
+      document.getElementById('val-friction').textContent = FRICTION.toFixed(4);
+    });
     const TRAIL_LEN = 60;
     const MAX_PARTICLES = 600;
-    const MAX_BALLS = 30;
+    const MAX_BALLS = 20;
+    const FIXED_DT = 1000 / 60;
+
+    let audioCtx = null;
+    function initAudio() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    function playBoom() {
+      const a = new Audio('boom.m4a');
+      a.volume = 1;
+      a.play().catch(() => {});
+    }
+
+    function playBounce(strength) {
+      if (!audioCtx) return;
+      const vol = Math.min(strength / 20, 1);
+      const freq = 60 + (1 - vol) * 80;
+
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      const filter = audioCtx.createBiquadFilter();
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(30, audioCtx.currentTime + 0.15);
+
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(800 + vol * 1200, audioCtx.currentTime);
+      filter.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.15);
+
+      gain.gain.setValueAtTime(vol * 0.3, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.2);
+    }
+
+    function playCollision(strength) {
+      if (!audioCtx) return;
+      const vol = Math.min(strength / 15, 1);
+
+      const bufferSize = audioCtx.sampleRate * 0.08;
+      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < bufferSize; i++) {
+        data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 3);
+      }
+
+      const noise = audioCtx.createBufferSource();
+      noise.buffer = buffer;
+
+      const filter = audioCtx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = 400 + vol * 600;
+      filter.Q.value = 2;
+
+      const gain = audioCtx.createGain();
+      gain.gain.setValueAtTime(vol * 0.15, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.08);
+
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(audioCtx.destination);
+      noise.start();
+    }
+
+    function playLaunch(velocity) {
+      if (!audioCtx) return;
+      if (velocity > 75000) { playBoom(); return; }
+      const vol = Math.min(velocity / 60, 1);
+      const t = audioCtx.currentTime;
+      const delay = 0.03;
+
+      const compressor = audioCtx.createDynamicsCompressor();
+      compressor.threshold.value = -20;
+      compressor.knee.value = 10;
+      compressor.ratio.value = 8;
+      compressor.attack.value = 0.002;
+      compressor.release.value = 0.15;
+      compressor.connect(audioCtx.destination);
+
+      const sub = audioCtx.createOscillator();
+      const subGain = audioCtx.createGain();
+      sub.type = 'sine';
+      sub.frequency.setValueAtTime(80, t + delay);
+      sub.frequency.exponentialRampToValueAtTime(25, t + delay + 0.5);
+      subGain.gain.setValueAtTime(0, t);
+      subGain.gain.setValueAtTime(vol * 0.5, t + delay);
+      subGain.gain.setTargetAtTime(0.001, t + delay + 0.3, 0.15);
+      sub.connect(subGain);
+      subGain.connect(compressor);
+      sub.start(t);
+      sub.stop(t + delay + 1.5);
+
+      const hit = audioCtx.createOscillator();
+      const hitGain = audioCtx.createGain();
+      hit.type = 'sawtooth';
+      hit.frequency.setValueAtTime(200 + vol * 300, t + delay);
+      hit.frequency.exponentialRampToValueAtTime(30, t + delay + 0.15);
+      hitGain.gain.setValueAtTime(0, t);
+      hitGain.gain.setValueAtTime(vol * 0.35, t + delay);
+      hitGain.gain.exponentialRampToValueAtTime(0.001, t + delay + 0.12);
+      hit.connect(hitGain);
+      hitGain.connect(compressor);
+      hit.start(t);
+      hit.stop(t + delay + 0.2);
+
+      const ringFreqs = [220, 330, 440, 587];
+      ringFreqs.forEach((freq, i) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        const filter = audioCtx.createBiquadFilter();
+        osc.type = 'sine';
+        osc.frequency.value = freq * (0.98 + Math.random() * 0.04);
+        filter.type = 'bandpass';
+        filter.frequency.value = freq;
+        filter.Q.value = 30;
+        const ringVol = vol * 0.06 * (1 - i * 0.15);
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.setValueAtTime(ringVol, t + delay + 0.01);
+        gain.gain.setTargetAtTime(0.001, t + delay + 0.1, 0.3 + i * 0.15);
+        osc.connect(filter);
+        filter.connect(gain);
+        gain.connect(compressor);
+        osc.start(t);
+        osc.stop(t + delay + 2);
+      });
+
+      const noiseLen = audioCtx.sampleRate * 0.8;
+      const noiseBuf = audioCtx.createBuffer(1, noiseLen, audioCtx.sampleRate);
+      const nd = noiseBuf.getChannelData(0);
+      for (let i = 0; i < noiseLen; i++) nd[i] = Math.random() * 2 - 1;
+      const noise = audioCtx.createBufferSource();
+      noise.buffer = noiseBuf;
+      const noiseFilter = audioCtx.createBiquadFilter();
+      noiseFilter.type = 'highpass';
+      noiseFilter.frequency.setValueAtTime(2000, t + delay);
+      noiseFilter.frequency.exponentialRampToValueAtTime(200, t + delay + 0.4);
+      const noiseGain = audioCtx.createGain();
+      noiseGain.gain.setValueAtTime(0, t);
+      noiseGain.gain.setValueAtTime(vol * 0.15, t + delay);
+      noiseGain.gain.setTargetAtTime(0.001, t + delay + 0.05, 0.12);
+      noise.connect(noiseFilter);
+      noiseFilter.connect(noiseGain);
+      noiseGain.connect(compressor);
+      noise.start(t);
+
+      const convLen = audioCtx.sampleRate * 1.5;
+      const convBuf = audioCtx.createBuffer(1, convLen, audioCtx.sampleRate);
+      const cd = convBuf.getChannelData(0);
+      for (let i = 0; i < convLen; i++) {
+        cd[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / convLen, 2.5);
+      }
+      const convolver = audioCtx.createConvolver();
+      convolver.buffer = convBuf;
+      const convGain = audioCtx.createGain();
+      convGain.gain.value = vol * 0.3;
+      subGain.connect(convolver);
+      hitGain.connect(convolver);
+      convolver.connect(convGain);
+      convGain.connect(compressor);
+    }
+
+    let chargeNodes = null;
+
+    function startCharge() {
+      if (!audioCtx) return;
+
+      const master = audioCtx.createGain();
+      master.gain.value = 0;
+      master.connect(audioCtx.destination);
+
+      const osc1 = audioCtx.createOscillator();
+      osc1.type = 'sine';
+      osc1.frequency.value = 55;
+      const g1 = audioCtx.createGain();
+      g1.gain.value = 0.5;
+      osc1.connect(g1);
+      g1.connect(master);
+      osc1.start();
+
+      const osc2 = audioCtx.createOscillator();
+      osc2.type = 'sine';
+      osc2.frequency.value = 55.5;
+      const g2 = audioCtx.createGain();
+      g2.gain.value = 0.3;
+      osc2.connect(g2);
+      g2.connect(master);
+      osc2.start();
+
+      const osc3 = audioCtx.createOscillator();
+      osc3.type = 'triangle';
+      osc3.frequency.value = 110;
+      const g3 = audioCtx.createGain();
+      g3.gain.value = 0;
+      osc3.connect(g3);
+      g3.connect(master);
+      osc3.start();
+
+      const lfo = audioCtx.createOscillator();
+      lfo.type = 'sine';
+      lfo.frequency.value = 4;
+      const lfoGain = audioCtx.createGain();
+      lfoGain.gain.value = 3;
+      lfo.connect(lfoGain);
+      lfoGain.connect(osc1.frequency);
+      lfo.start();
+
+      const noiseLen = audioCtx.sampleRate * 2;
+      const noiseBuf = audioCtx.createBuffer(1, noiseLen, audioCtx.sampleRate);
+      const nd = noiseBuf.getChannelData(0);
+      for (let i = 0; i < noiseLen; i++) nd[i] = Math.random() * 2 - 1;
+      const noise = audioCtx.createBufferSource();
+      noise.buffer = noiseBuf;
+      noise.loop = true;
+      const noiseFilter = audioCtx.createBiquadFilter();
+      noiseFilter.type = 'bandpass';
+      noiseFilter.frequency.value = 200;
+      noiseFilter.Q.value = 5;
+      const noiseGain = audioCtx.createGain();
+      noiseGain.gain.value = 0;
+      noise.connect(noiseFilter);
+      noiseFilter.connect(noiseGain);
+      noiseGain.connect(master);
+      noise.start();
+
+      chargeNodes = { master, osc1, osc2, osc3, g1, g2, g3, lfo, lfoGain, noise, noiseFilter, noiseGain };
+    }
+
+    function updateCharge(intensity) {
+      if (!chargeNodes) return;
+      const t = audioCtx.currentTime;
+      const n = chargeNodes;
+
+      n.master.gain.setTargetAtTime(Math.min(intensity * 0.15, 0.2), t, 0.04);
+
+      const baseFreq = 55 + intensity * 400;
+      n.osc1.frequency.setTargetAtTime(baseFreq, t, 0.06);
+      n.osc2.frequency.setTargetAtTime(baseFreq * 1.005 + intensity * 8, t, 0.06);
+      n.osc3.frequency.setTargetAtTime(baseFreq * 2.01, t, 0.06);
+      n.g3.gain.setTargetAtTime(Math.min(intensity * 0.4, 0.5), t, 0.05);
+
+      n.lfo.frequency.setTargetAtTime(4 + intensity * 20, t, 0.05);
+      n.lfoGain.gain.setTargetAtTime(3 + intensity * 30, t, 0.05);
+
+      n.noiseFilter.frequency.setTargetAtTime(200 + intensity * 3000, t, 0.05);
+      n.noiseGain.gain.setTargetAtTime(Math.min(intensity * 0.3, 0.4), t, 0.04);
+    }
+
+    function stopCharge() {
+      if (!chargeNodes) return;
+      const t = audioCtx.currentTime;
+      const n = chargeNodes;
+      n.master.gain.setTargetAtTime(0, t, 0.015);
+      setTimeout(() => {
+        try {
+          n.osc1.stop(); n.osc2.stop(); n.osc3.stop();
+          n.lfo.stop(); n.noise.stop();
+        } catch(e) {}
+      }, 100);
+      chargeNodes = null;
+    }
 
     let balls = [];
     let particles = [];
+    let shockwaves = [];
     let impacts = [];
     let shakeX = 0, shakeY = 0;
     let dragging = false;
     let dragStart = null;
     let dragCurrent = null;
+    let stageBall = null;
     let hintTimer = null;
     let frame = 0;
+    let lastTime = 0;
+    let frozen = false;
+    let frozenBall = null;
+    let frozenStart = 0;
+    const FREEZE_DURATION = 1000;
 
     class Ball {
       constructor(x, y, vx, vy, r) {
@@ -168,6 +501,7 @@
         }
 
         if (bounced && impactStrength > 2) {
+          playBounce(impactStrength);
           const count = Math.min(Math.floor(impactStrength * 3), 40);
           for (let i = 0; i < count; i++) {
             const angle = Math.random() * Math.PI * 2;
@@ -189,9 +523,6 @@
         }
 
         const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
-        if (this.age > 500 && speed < 0.5 && Math.abs(this.y + this.r - H) < 2) {
-          this.alive = false;
-        }
       }
 
       draw() {
@@ -339,6 +670,94 @@
       }
     }
 
+    class Shockwave {
+      constructor(x, y, hue) {
+        this.x = x;
+        this.y = y;
+        this.hue = hue;
+        this.life = 4;
+        this.maxLife = 4;
+        this.alive = true;
+        this.maxRadius = Math.max(W, H) * 1.5;
+        this.prevRadius = 0;
+      }
+
+      update() {
+        const t = 1 - this.life / this.maxLife;
+        const eased = 1 - Math.pow(1 - t, 3);
+        const radius = eased * this.maxRadius;
+
+        for (const ball of balls) {
+          const dx = ball.x - this.x;
+          const dy = ball.y - this.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+
+          if (dist > this.prevRadius - ball.r && dist < radius + ball.r && dist > 0) {
+            const nx = dx / dist;
+            const ny = dy / dist;
+            const force = 25 * (1 - t);
+            ball.vx += nx * force;
+            ball.vy += ny * force;
+            ball.squash = 0.6;
+          }
+        }
+
+        this.prevRadius = radius;
+        this.life -= 0.016;
+        if (this.life <= 0) this.alive = false;
+      }
+
+      draw() {
+        const t = 1 - this.life / this.maxLife;
+        const eased = 1 - Math.pow(1 - t, 3);
+        const radius = eased * this.maxRadius;
+        const fade = t < 0.6 ? 1 : 1 - Math.pow((t - 0.6) / 0.4, 0.5);
+        if (radius < 1 || fade <= 0) return;
+
+        ctx.save();
+
+        const wakeWidth = radius * 0.35;
+        const innerR = Math.max(0, radius - wakeWidth);
+
+        if (innerR > 0) {
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, radius, 0, Math.PI * 2);
+          ctx.arc(this.x, this.y, innerR, 0, Math.PI * 2, true);
+          const wake = ctx.createRadialGradient(this.x, this.y, innerR, this.x, this.y, radius);
+          wake.addColorStop(0, `hsla(${this.hue}, 60%, 40%, 0)`);
+          wake.addColorStop(0.6, `hsla(${this.hue}, 80%, 50%, ${fade * 0.06})`);
+          wake.addColorStop(0.85, `hsla(${this.hue}, 90%, 60%, ${fade * 0.12})`);
+          wake.addColorStop(1, `hsla(${this.hue}, 100%, 75%, ${fade * 0.2})`);
+          ctx.fillStyle = wake;
+          ctx.fill();
+        }
+
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `hsla(${this.hue}, 100%, 90%, ${fade * 0.9})`;
+        ctx.lineWidth = 2.5 + (1 - eased) * 4;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `hsla(${this.hue}, 100%, 70%, ${fade * 0.25})`;
+        ctx.lineWidth = 12 + (1 - eased) * 20;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, radius + 2, 0, Math.PI * 2);
+        ctx.strokeStyle = `hsla(${this.hue}, 80%, 50%, ${fade * 0.08})`;
+        ctx.lineWidth = 40;
+        ctx.stroke();
+
+        ctx.restore();
+      }
+    }
+
+    function spawnShockwave(x, y, hue) {
+      shockwaves.push(new Shockwave(x, y, hue));
+    }
+
     function spawnBall(x, y, vx, vy) {
       if (balls.length >= MAX_BALLS) {
         balls.shift();
@@ -350,78 +769,77 @@
     setTimeout(() => spawnBall(W * 0.7, H * 0.1, -4, 1), 800);
     setTimeout(() => spawnBall(W * 0.5, H * 0.05, 2, -1), 1600);
 
-    canvas.addEventListener('mousedown', (e) => {
+    function beginDrag(x, y) {
+      initAudio();
       dragging = true;
-      dragStart = { x: e.clientX, y: e.clientY };
-      dragCurrent = { x: e.clientX, y: e.clientY };
-
+      dragStart = { x, y };
+      dragCurrent = { x, y };
+      stageBall = new Ball(x, y, 0, 0);
+      stageBall.spawnScale = 0;
+      startCharge();
       if (!hintTimer) {
         hintTimer = true;
         hint.classList.add('hidden');
       }
-    });
+    }
 
-    canvas.addEventListener('mousemove', (e) => {
-      if (dragging) {
-        dragCurrent = { x: e.clientX, y: e.clientY };
-      }
-    });
+    function moveDrag(x, y) {
+      if (dragging) dragCurrent = { x, y };
+    }
 
-    canvas.addEventListener('mouseup', (e) => {
+    function endDrag(x, y) {
+      stopCharge();
       if (dragging && dragStart) {
-        const dx = dragStart.x - e.clientX;
-        const dy = dragStart.y - e.clientY;
-        const power = Math.min(Math.sqrt(dx * dx + dy * dy) * 0.15, 25);
+        const dx = dragStart.x - x;
+        const dy = dragStart.y - y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const power = Math.pow(dist / 50, 2.5) * 50;
         const angle = Math.atan2(dy, dx);
-        spawnBall(
-          dragStart.x,
-          dragStart.y,
-          Math.cos(angle) * power,
-          Math.sin(angle) * power
-        );
+        const vx = Math.cos(angle) * power;
+        const vy = Math.sin(angle) * power;
+
+        if (power > 75000) {
+          playBoom();
+          frozen = true;
+          frozenStart = performance.now();
+          frozenBall = {
+            x: dragStart.x,
+            y: dragStart.y,
+            vx, vy,
+            r: stageBall ? stageBall.r : 22,
+            hue: stageBall ? stageBall.hue : Math.random() * 360,
+          };
+        } else {
+          playLaunch(power);
+          spawnBall(dragStart.x, dragStart.y, vx, vy);
+        }
       }
       dragging = false;
       dragStart = null;
       dragCurrent = null;
-    });
+      stageBall = null;
+    }
+
+    canvas.addEventListener('mousedown', (e) => beginDrag(e.clientX, e.clientY));
+    canvas.addEventListener('mousemove', (e) => moveDrag(e.clientX, e.clientY));
+    canvas.addEventListener('mouseup', (e) => endDrag(e.clientX, e.clientY));
 
     canvas.addEventListener('touchstart', (e) => {
       e.preventDefault();
       const t = e.touches[0];
-      dragging = true;
-      dragStart = { x: t.clientX, y: t.clientY };
-      dragCurrent = { x: t.clientX, y: t.clientY };
-      if (!hintTimer) {
-        hintTimer = true;
-        hint.classList.add('hidden');
-      }
+      beginDrag(t.clientX, t.clientY);
     }, { passive: false });
 
     canvas.addEventListener('touchmove', (e) => {
       e.preventDefault();
-      if (dragging) {
-        const t = e.touches[0];
-        dragCurrent = { x: t.clientX, y: t.clientY };
-      }
+      const t = e.touches[0];
+      moveDrag(t.clientX, t.clientY);
     }, { passive: false });
 
     canvas.addEventListener('touchend', (e) => {
       e.preventDefault();
-      if (dragging && dragStart && dragCurrent) {
-        const dx = dragStart.x - dragCurrent.x;
-        const dy = dragStart.y - dragCurrent.y;
-        const power = Math.min(Math.sqrt(dx * dx + dy * dy) * 0.15, 25);
-        const angle = Math.atan2(dy, dx);
-        spawnBall(
-          dragStart.x,
-          dragStart.y,
-          Math.cos(angle) * power,
-          Math.sin(angle) * power
-        );
-      }
-      dragging = false;
-      dragStart = null;
-      dragCurrent = null;
+      const last = dragCurrent || dragStart;
+      if (last) endDrag(last.x, last.y);
     }, { passive: false });
 
     function drawBackground() {
@@ -435,48 +853,243 @@
       ctx.fillRect(0, 0, W, H);
     }
 
-    function drawDragLine() {
-      if (!dragging || !dragStart || !dragCurrent) return;
+    function updateAndDrawStageBall() {
+      if (!stageBall || !dragStart || !dragCurrent) return;
+
+      stageBall.spawnScale = Math.min((stageBall.spawnScale || 0) + 0.08, 1);
+      stageBall.hue = (stageBall.hue + 0.6) % 360;
 
       const dx = dragStart.x - dragCurrent.x;
       const dy = dragStart.y - dragCurrent.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
+      const power = dist * 0.15;
+      const velocity = power;
+      const intensity = Math.pow(velocity / 50, 2.5);
+      updateCharge(intensity);
 
-      if (dist < 5) return;
+      const shake = intensity * 20;
+      const bx = dragStart.x + (Math.random() - 0.5) * shake;
+      const by = dragStart.y + (Math.random() - 0.5) * shake;
 
-      const angle = Math.atan2(dy, dx);
-      const power = Math.min(dist * 0.15, 25);
-      const lineLen = power * 4;
+      if (intensity > 0.05 && frame % Math.max(1, Math.floor(3 - Math.min(intensity, 1) * 2)) === 0) {
+        const count = Math.ceil(intensity * 6);
+        for (let i = 0; i < count; i++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 1 + intensity * 8;
+          particles.push(new Particle(
+            bx, by,
+            Math.cos(angle) * speed,
+            Math.sin(angle) * speed,
+            stageBall.hue + (Math.random() - 0.5) * 50,
+            0.3 + intensity * 0.5
+          ));
+        }
+      }
+
+      const scale = stageBall.spawnScale;
+      const eased = 1 - Math.pow(1 - scale, 3);
+      const drawR = stageBall.r * eased;
 
       ctx.save();
-      ctx.setLineDash([4, 6]);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.translate(bx, by);
+
+      if (scale < 1) {
+        const ringR = stageBall.r * (1 + (1 - scale) * 3);
+        ctx.beginPath();
+        ctx.arc(0, 0, ringR, 0, Math.PI * 2);
+        const ringGrad = ctx.createRadialGradient(0, 0, ringR * 0.7, 0, 0, ringR);
+        ringGrad.addColorStop(0, `hsla(${stageBall.hue}, 100%, 70%, 0)`);
+        ringGrad.addColorStop(0.8, `hsla(${stageBall.hue}, 100%, 70%, ${(1 - scale) * 0.4})`);
+        ringGrad.addColorStop(1, `hsla(${stageBall.hue}, 100%, 70%, 0)`);
+        ctx.fillStyle = ringGrad;
+        ctx.fill();
+      }
+
+      const glowSize = drawR * (2.5 + intensity * 6);
       ctx.beginPath();
-      ctx.moveTo(dragStart.x, dragStart.y);
-      ctx.lineTo(
-        dragStart.x + Math.cos(angle) * lineLen,
-        dragStart.y + Math.sin(angle) * lineLen
-      );
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      ctx.setLineDash([]);
+      ctx.arc(0, 0, glowSize, 0, Math.PI * 2);
+      const outerGlow = ctx.createRadialGradient(0, 0, drawR * 0.5, 0, 0, glowSize);
+      outerGlow.addColorStop(0, `hsla(${stageBall.hue}, 100%, 60%, ${Math.min(0.3 + intensity * 0.5, 1)})`);
+      outerGlow.addColorStop(0.4, `hsla(${stageBall.hue}, 100%, 50%, ${Math.min(0.1 + intensity * 0.3, 0.8)})`);
+      outerGlow.addColorStop(1, `hsla(${stageBall.hue}, 100%, 40%, 0)`);
+      ctx.fillStyle = outerGlow;
+      ctx.fill();
 
       ctx.beginPath();
-      ctx.arc(dragStart.x, dragStart.y, 6, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+      ctx.arc(0, 0, drawR, 0, Math.PI * 2);
+      const bodyGrad = ctx.createRadialGradient(
+        -drawR * 0.3, -drawR * 0.3, drawR * 0.1,
+        0, 0, drawR
+      );
+      bodyGrad.addColorStop(0, `hsla(${stageBall.hue}, 80%, 90%, 1)`);
+      bodyGrad.addColorStop(0.3, `hsla(${stageBall.hue}, 100%, 65%, 0.95)`);
+      bodyGrad.addColorStop(0.7, `hsla(${(stageBall.hue + 30) % 360}, 100%, 45%, 0.9)`);
+      bodyGrad.addColorStop(1, `hsla(${(stageBall.hue + 60) % 360}, 100%, 25%, 0.8)`);
+      ctx.fillStyle = bodyGrad;
       ctx.fill();
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(-drawR * 0.25, -drawR * 0.25, drawR * 0.4, 0, Math.PI * 2);
+      const specGrad = ctx.createRadialGradient(
+        -drawR * 0.25, -drawR * 0.25, 0,
+        -drawR * 0.25, -drawR * 0.25, drawR * 0.4
+      );
+      specGrad.addColorStop(0, 'rgba(255, 255, 255, 0.7)');
+      specGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.1)');
+      specGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = specGrad;
+      ctx.fill();
+
+      ctx.globalCompositeOperation = 'source-over';
+
+      if (dist > 10) {
+        const angle = Math.atan2(dy, dx);
+        const lineLen = Math.min(power * 4, 120);
+        ctx.setLineDash([4, 6]);
+        ctx.beginPath();
+        ctx.moveTo(0, 0);
+        ctx.lineTo(Math.cos(angle) * lineLen, Math.sin(angle) * lineLen);
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.15 + intensity * 0.2})`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
 
       ctx.restore();
     }
 
-    function loop() {
+    function collideBalls() {
+      for (let i = 0; i < balls.length; i++) {
+        for (let j = i + 1; j < balls.length; j++) {
+          const a = balls[i], b = balls[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          const minDist = a.r + b.r;
+
+          if (dist < minDist && dist > 0) {
+            const nx = dx / dist;
+            const ny = dy / dist;
+            const overlap = minDist - dist;
+            a.x -= nx * overlap * 0.5;
+            a.y -= ny * overlap * 0.5;
+            b.x += nx * overlap * 0.5;
+            b.y += ny * overlap * 0.5;
+
+            const dvx = a.vx - b.vx;
+            const dvy = a.vy - b.vy;
+            const dvDotN = dvx * nx + dvy * ny;
+
+            if (dvDotN > 0) {
+              const restitution = 0.85;
+              a.vx -= dvDotN * nx * restitution;
+              a.vy -= dvDotN * ny * restitution;
+              b.vx += dvDotN * nx * restitution;
+              b.vy += dvDotN * ny * restitution;
+
+              a.squash = 0.8;
+              b.squash = 0.8;
+
+              const impactStrength = Math.abs(dvDotN);
+              if (impactStrength > 3) {
+                playCollision(impactStrength);
+                const cx = (a.x + b.x) / 2;
+                const cy = (a.y + b.y) / 2;
+                const mixHue = (a.hue + b.hue) / 2;
+                impacts.push(new Impact(cx, cy, mixHue, impactStrength * 0.5));
+                const count = Math.min(Math.floor(impactStrength * 1.5), 20);
+                for (let k = 0; k < count; k++) {
+                  const angle = Math.random() * Math.PI * 2;
+                  const speed = impactStrength * (0.2 + Math.random() * 0.5);
+                  particles.push(new Particle(
+                    cx, cy,
+                    Math.cos(angle) * speed * 0.4,
+                    Math.sin(angle) * speed * 0.4,
+                    mixHue + (Math.random() - 0.5) * 60,
+                    0.4 + Math.random() * 0.4
+                  ));
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    function drawFrozenBall(progress) {
+      if (!frozenBall) return;
+      const fb = frozenBall;
+      const shrink = 1 - Math.pow(progress, 0.5);
+      const drawR = fb.r * shrink;
+      if (drawR < 0.5) return;
+
+      const shake = progress * 12;
+      const bx = fb.x + (Math.random() - 0.5) * shake;
+      const by = fb.y + (Math.random() - 0.5) * shake;
+
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.translate(bx, by);
+
+      const glowSize = drawR * (2.5 + progress * 4);
+      ctx.beginPath();
+      ctx.arc(0, 0, glowSize, 0, Math.PI * 2);
+      const outerGlow = ctx.createRadialGradient(0, 0, drawR * 0.5, 0, 0, glowSize);
+      outerGlow.addColorStop(0, `hsla(${fb.hue}, 100%, 70%, ${0.5 + progress * 0.5})`);
+      outerGlow.addColorStop(0.4, `hsla(${fb.hue}, 100%, 50%, ${0.2 + progress * 0.3})`);
+      outerGlow.addColorStop(1, `hsla(${fb.hue}, 100%, 40%, 0)`);
+      ctx.fillStyle = outerGlow;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(0, 0, drawR, 0, Math.PI * 2);
+      const bodyGrad = ctx.createRadialGradient(
+        -drawR * 0.3, -drawR * 0.3, drawR * 0.1,
+        0, 0, drawR
+      );
+      const whiteness = Math.min(progress * 1.5, 1);
+      const lum = 65 + whiteness * 30;
+      bodyGrad.addColorStop(0, `hsla(${fb.hue}, ${80 - whiteness * 40}%, ${Math.min(lum + 25, 100)}%, 1)`);
+      bodyGrad.addColorStop(0.3, `hsla(${fb.hue}, 100%, ${lum}%, 0.95)`);
+      bodyGrad.addColorStop(1, `hsla(${(fb.hue + 60) % 360}, 100%, ${lum - 20}%, 0.8)`);
+      ctx.fillStyle = bodyGrad;
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function loop(now) {
+      if (!lastTime) lastTime = now;
+      const elapsed = now - lastTime;
+      lastTime = now;
+      const steps = Math.min(Math.round(elapsed / FIXED_DT), 4);
+
       frame++;
 
-      shakeX *= 0.85;
-      shakeY *= 0.85;
+      if (frozen) {
+        shakeX = 0;
+        shakeY = 0;
+      } else {
+        shakeX *= 0.85;
+        shakeY *= 0.85;
+      }
+
+      for (let s = 0; s < Math.max(steps, 1); s++) {
+        for (const ball of balls) ball.update();
+        collideBalls();
+        for (const impact of impacts) impact.update();
+        for (const p of particles) p.update();
+        for (const s of shockwaves) s.update();
+      }
+
+      impacts = impacts.filter(i => i.alive);
+      particles = particles.filter(p => p.alive);
+      shockwaves = shockwaves.filter(s => s.alive);
+      if (particles.length > MAX_PARTICLES) {
+        particles = particles.slice(-MAX_PARTICLES);
+      }
+      balls = balls.filter(b => b.alive);
 
       ctx.save();
       ctx.translate(shakeX, shakeY);
@@ -485,32 +1098,53 @@
 
       ctx.globalCompositeOperation = 'lighter';
 
-      for (const impact of impacts) {
-        impact.update();
-        impact.draw();
-      }
-      impacts = impacts.filter(i => i.alive);
+      for (const impact of impacts) impact.draw();
+      for (const p of particles) p.draw();
+      for (const s of shockwaves) s.draw();
+      for (const ball of balls) ball.draw();
 
-      for (const p of particles) {
-        p.update();
-        p.draw();
+      if (frozen && frozenBall) {
+        const progress = Math.min((now - frozenStart) / FREEZE_DURATION, 1);
+        drawFrozenBall(progress);
+        if (progress >= 1) {
+          frozen = false;
+          spawnShockwave(frozenBall.x, frozenBall.y, frozenBall.hue);
+          spawnBall(frozenBall.x, frozenBall.y, frozenBall.vx, frozenBall.vy);
+          frozenBall = null;
+        }
       }
-      particles = particles.filter(p => p.alive);
-      if (particles.length > MAX_PARTICLES) {
-        particles = particles.slice(-MAX_PARTICLES);
-      }
-
-      for (const ball of balls) {
-        ball.update();
-        ball.draw();
-      }
-      balls = balls.filter(b => b.alive);
 
       ctx.globalCompositeOperation = 'source-over';
 
-      drawDragLine();
+      updateAndDrawStageBall();
 
       ctx.restore();
+
+      if (stageBall && dragStart && dragCurrent) {
+        const dx = dragStart.x - dragCurrent.x;
+        const dy = dragStart.y - dragCurrent.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const v = Math.pow(dist / 50, 2.5) * 50;
+        const i = Math.pow(dist * 0.15 / 50, 2.5);
+        debug.textContent =
+          `pos      ${stageBall.x.toFixed(1)}, ${stageBall.y.toFixed(1)}\n` +
+          `vel      ${v.toFixed(2)}\n` +
+          `intensity ${i.toFixed(3)}\n` +
+          `hue      ${stageBall.hue.toFixed(0)}\n` +
+          `balls    ${balls.length}/${MAX_BALLS}`;
+      } else if (balls.length > 0) {
+        const b = balls[balls.length - 1];
+        const v = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+        debug.textContent =
+          `pos      ${b.x.toFixed(1)}, ${b.y.toFixed(1)}\n` +
+          `vel      ${v.toFixed(2)}  (${b.vx.toFixed(2)}, ${b.vy.toFixed(2)})\n` +
+          `hue      ${b.hue.toFixed(0)}\n` +
+          `squash   ${b.squash.toFixed(3)}\n` +
+          `age      ${b.age}\n` +
+          `balls    ${balls.length}/${MAX_BALLS}`;
+      } else {
+        debug.textContent = `balls    0/${MAX_BALLS}`;
+      }
 
       requestAnimationFrame(loop);
     }
