@@ -42,6 +42,25 @@
 
     .hint.hidden { opacity: 0; }
 
+    #greet {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: clamp(48px, 9vw, 160px);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: rgba(255, 255, 255, 0.09);
+      pointer-events: none;
+      -webkit-user-select: none;
+      user-select: none;
+      z-index: 5;
+      transition: opacity 4s ease;
+    }
+
+    #greet.gone { opacity: 0; }
+
     #debug {
       position: fixed;
       bottom: 8px;
@@ -91,6 +110,7 @@
 </head>
 <body>
   <canvas id="c"></canvas>
+  <div id="greet">Hi Jordell&hellip;</div>
   <div class="hint" id="hint">click &amp; drag to launch</div>
   <div id="debug"></div>
   <div id="sliders">
@@ -101,9 +121,12 @@
 
   <script>
   (() => {
+    console.log('codyolsen.com build: dev copy (not a Hugo build)');
     const canvas = document.getElementById('c');
     const ctx = canvas.getContext('2d');
     const hint = document.getElementById('hint');
+    const greet = document.getElementById('greet');
+    let greeted = false;
     const debug = document.getElementById('debug');
     const MOBILE = matchMedia('(pointer: coarse)').matches;
     let W, H, dpr;
@@ -558,8 +581,9 @@
 
         // Cap speed to a fraction of the viewport: beyond this a ball crosses
         // the arena in under a frame and just clamps corner-to-corner,
-        // looking stuck until bounce decay catches up.
-        const cap = Math.min(W, H) * 0.1;
+        // looking stuck until bounce decay catches up. 0.45 keeps launches
+        // ferocious (full crossing in ~3 frames) while staying expressible.
+        const cap = Math.min(W, H) * 0.45;
         const sp = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
         if (sp > cap) {
           const k = cap / sp;
@@ -583,7 +607,7 @@
           this.y = H - this.r;
           impactStrength = Math.abs(this.vy);
           this.vy = -this.vy * BOUNCE;
-          this.vx += (Math.random() - 0.5) * 0.5;
+          this.vx += (Math.random() - 0.5) * (0.5 + impactStrength * 0.25);
           bounced = true;
           iy = H;
           this.squash = 0.6 + 0.4 * (1 - Math.min(impactStrength / 20, 1));
@@ -594,6 +618,7 @@
           this.y = this.r;
           impactStrength = Math.abs(this.vy);
           this.vy = -this.vy * BOUNCE;
+          this.vx += (Math.random() - 0.5) * impactStrength * 0.25;
           bounced = true;
           iy = 0;
           this.squash = 0.7;
@@ -603,6 +628,7 @@
           this.x = W - this.r;
           impactStrength = Math.abs(this.vx);
           this.vx = -this.vx * BOUNCE;
+          this.vy += (Math.random() - 0.5) * impactStrength * 0.25;
           bounced = true;
           ix = W;
           this.squash = 0.7;
@@ -612,6 +638,7 @@
           this.x = this.r;
           impactStrength = Math.abs(this.vx);
           this.vx = -this.vx * BOUNCE;
+          this.vy += (Math.random() - 0.5) * impactStrength * 0.25;
           bounced = true;
           ix = 0;
           this.squash = 0.7;
@@ -851,6 +878,13 @@
       stageBall = new Ball(x, y, 0, 0);
       stageBall.spawnScale = 0;
       startCharge();
+      if (!greeted) {
+        greeted = true;
+        greet.classList.add('gone');
+        const laugh = new Audio('laugh.mp3');
+        laugh.volume = 0.9;
+        laugh.play().catch(() => {});
+      }
       if (!hintTimer) {
         hintTimer = true;
         hint.classList.add('hidden');

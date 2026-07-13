@@ -6,7 +6,10 @@ description: Verify the homepage canvas animation (static/index.html) in a headl
 # Verifying the canvas animation
 
 The site is a single-page Canvas2D animation. Source of truth is `static/index.html`;
-`layouts/index.html` and `public/index.html` must be kept byte-identical (cp after editing).
+after editing, `cp static/index.html layouts/index.html` and re-template the one
+divergent line: the build-stamp console.log (Hugo `now.Format` template in layouts,
+"dev copy" placeholder in static). Hugo renders the homepage from layouts/, so the
+layouts copy is what ships; public/ is CI build output (gitignored).
 
 ## Handle
 
