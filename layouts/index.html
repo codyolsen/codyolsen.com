@@ -105,10 +105,12 @@
     const ctx = canvas.getContext('2d');
     const hint = document.getElementById('hint');
     const debug = document.getElementById('debug');
+    const MOBILE = matchMedia('(pointer: coarse)').matches;
     let W, H, dpr;
+    let vignette = null;
 
     function resize() {
-      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      dpr = Math.min(window.devicePixelRatio || 1, MOBILE ? 1.25 : 2);
       W = window.innerWidth;
       H = window.innerHeight;
       canvas.width = W * dpr;
@@ -116,6 +118,20 @@
       canvas.style.width = W + 'px';
       canvas.style.height = H + 'px';
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      // Pre-render the vignette at half resolution once per resize —
+      // it's a smooth gradient, so upscaling is invisible.
+      vignette = document.createElement('canvas');
+      const vw = Math.max(1, Math.ceil(W / 2));
+      const vh = Math.max(1, Math.ceil(H / 2));
+      vignette.width = vw;
+      vignette.height = vh;
+      const vctx = vignette.getContext('2d');
+      const vg = vctx.createRadialGradient(vw / 2, vh / 2, vw * 0.2, vw / 2, vh / 2, vw * 0.8);
+      vg.addColorStop(0, 'rgba(5, 5, 8, 0)');
+      vg.addColorStop(1, 'rgba(0, 0, 0, 0.5)');
+      vctx.fillStyle = vg;
+      vctx.fillRect(0, 0, vw, vh);
     }
 
     window.addEventListener('resize', resize);
@@ -137,10 +153,17 @@
       FRICTION = 0.99 + (e.target.value / 100) * 0.01;
       document.getElementById('val-friction').textContent = FRICTION.toFixed(4);
     });
-    const TRAIL_LEN = 60;
-    const MAX_PARTICLES = 600;
+    const TRAIL_LEN = MOBILE ? 24 : 60;
+    const MAX_PARTICLES = MOBILE ? 250 : 600;
+    const PARTICLE_SCALE = MOBILE ? 0.5 : 1;
     const MAX_BALLS = 20;
     const FIXED_DT = 1000 / 60;
+
+    // Adaptive quality: when the rolling frame-time average climbs, thin the
+    // trails and pause particle spawning instead of grinding to a halt.
+    let frameAvg = FIXED_DT;
+    let strained = false;
+    let trailStride = MOBILE ? 2 : 1;
 
     let audioCtx = null;
     function initAudio() {
@@ -424,6 +447,88 @@
     let frozenStart = 0;
     const FREEZE_DURATION = 1000;
 
+    // --- Sprite cache -------------------------------------------------------
+    // Pre-rendered radial gradients keyed by hue bucket (10° each). Hue only
+    // drifts 0.6°/frame, so bucketing is imperceptible — and this replaces
+    // ~1800 createRadialGradient allocations per frame with drawImage calls,
+    // which is what made phones grind to a halt.
+    const HUE_STEP = 10;
+    function makeSpriteCache(size, paint) {
+      const cache = new Array(360 / HUE_STEP);
+      return (hue) => {
+        const b = ((Math.round(hue / HUE_STEP) % 36) + 36) % 36;
+        let s = cache[b];
+        if (!s) {
+          s = document.createElement('canvas');
+          s.width = s.height = size;
+          paint(s.getContext('2d'), b * HUE_STEP, size / 2);
+          cache[b] = s;
+        }
+        return s;
+      };
+    }
+
+    // Trail blob — draw with globalAlpha = progress * 0.4
+    const trailSprite = makeSpriteCache(64, (c, hue, r) => {
+      const g = c.createRadialGradient(r, r, 0, r, r, r);
+      g.addColorStop(0, `hsla(${hue}, 100%, 70%, 1)`);
+      g.addColorStop(0.6, `hsla(${hue}, 100%, 50%, 0.5)`);
+      g.addColorStop(1, `hsla(${hue}, 100%, 40%, 0)`);
+      c.fillStyle = g;
+      c.fillRect(0, 0, r * 2, r * 2);
+    });
+
+    // Particle blob — draw with globalAlpha = life fraction
+    const particleSprite = makeSpriteCache(48, (c, hue, r) => {
+      const g = c.createRadialGradient(r, r, 0, r, r, r);
+      g.addColorStop(0, `hsla(${hue}, 100%, 80%, 0.8)`);
+      g.addColorStop(0.3, `hsla(${hue}, 100%, 60%, 0.3)`);
+      g.addColorStop(1, `hsla(${hue}, 100%, 40%, 0)`);
+      c.fillStyle = g;
+      c.fillRect(0, 0, r * 2, r * 2);
+    });
+
+    // Ball outer glow — sprite radius maps to 2.5 × ball radius
+    const glowSprite = makeSpriteCache(96, (c, hue, r) => {
+      const g = c.createRadialGradient(r, r, r * 0.2, r, r, r);
+      g.addColorStop(0, `hsla(${hue}, 100%, 60%, 0.3)`);
+      g.addColorStop(0.4, `hsla(${hue}, 100%, 50%, 0.1)`);
+      g.addColorStop(1, `hsla(${hue}, 100%, 40%, 0)`);
+      c.fillStyle = g;
+      c.fillRect(0, 0, r * 2, r * 2);
+    });
+
+    // Ball body + specular highlight baked together
+    const ballSprite = makeSpriteCache(96, (c, hue, r) => {
+      c.beginPath();
+      c.arc(r, r, r, 0, Math.PI * 2);
+      const body = c.createRadialGradient(r * 0.7, r * 0.7, r * 0.1, r, r, r);
+      body.addColorStop(0, `hsla(${hue}, 80%, 90%, 1)`);
+      body.addColorStop(0.3, `hsla(${hue}, 100%, 65%, 0.95)`);
+      body.addColorStop(0.7, `hsla(${(hue + 30) % 360}, 100%, 45%, 0.9)`);
+      body.addColorStop(1, `hsla(${(hue + 60) % 360}, 100%, 25%, 0.8)`);
+      c.fillStyle = body;
+      c.fill();
+      c.beginPath();
+      c.arc(r * 0.75, r * 0.75, r * 0.4, 0, Math.PI * 2);
+      const spec = c.createRadialGradient(r * 0.75, r * 0.75, 0, r * 0.75, r * 0.75, r * 0.4);
+      spec.addColorStop(0, 'rgba(255, 255, 255, 0.7)');
+      spec.addColorStop(0.5, 'rgba(255, 255, 255, 0.1)');
+      spec.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      c.fillStyle = spec;
+      c.fill();
+    });
+
+    // Impact flash fill — draw with globalAlpha = life
+    const impactSprite = makeSpriteCache(64, (c, hue, r) => {
+      const g = c.createRadialGradient(r, r, 0, r, r, r);
+      g.addColorStop(0, `hsla(${hue}, 100%, 80%, 0.15)`);
+      g.addColorStop(1, `hsla(${hue}, 100%, 50%, 0)`);
+      c.fillStyle = g;
+      c.fillRect(0, 0, r * 2, r * 2);
+    });
+    // ------------------------------------------------------------------------
+
     class Ball {
       constructor(x, y, vx, vy, r) {
         this.x = x;
@@ -502,7 +607,7 @@
 
         if (bounced && impactStrength > 2) {
           playBounce(impactStrength);
-          const count = Math.min(Math.floor(impactStrength * 3), 40);
+          const count = strained ? 0 : Math.round(Math.min(Math.floor(impactStrength * 3), 40) * PARTICLE_SCALE);
           for (let i = 0; i < count; i++) {
             const angle = Math.random() * Math.PI * 2;
             const speed = impactStrength * (0.3 + Math.random() * 0.7);
@@ -526,22 +631,14 @@
       }
 
       draw() {
-        for (let i = 0; i < this.trail.length; i++) {
+        for (let i = 0; i < this.trail.length; i += trailStride) {
           const t = this.trail[i];
           const progress = i / this.trail.length;
-          const alpha = progress * 0.4;
           const size = t.r * (0.15 + 0.85 * progress);
-
-          ctx.beginPath();
-          ctx.arc(t.x, t.y, size, 0, Math.PI * 2);
-
-          const g = ctx.createRadialGradient(t.x, t.y, 0, t.x, t.y, size);
-          g.addColorStop(0, `hsla(${t.hue}, 100%, 70%, ${alpha})`);
-          g.addColorStop(0.6, `hsla(${t.hue}, 100%, 50%, ${alpha * 0.5})`);
-          g.addColorStop(1, `hsla(${t.hue}, 100%, 40%, 0)`);
-          ctx.fillStyle = g;
-          ctx.fill();
+          ctx.globalAlpha = progress * 0.4;
+          ctx.drawImage(trailSprite(t.hue), t.x - size, t.y - size, size * 2, size * 2);
         }
+        ctx.globalAlpha = 1;
 
         const drawR = this.r;
         const sx = 1 / this.squash;
@@ -551,39 +648,9 @@
         ctx.translate(this.x, this.y);
         ctx.scale(sx, sy);
 
-        ctx.beginPath();
-        ctx.arc(0, 0, drawR * 2.5, 0, Math.PI * 2);
-        const outerGlow = ctx.createRadialGradient(0, 0, drawR * 0.5, 0, 0, drawR * 2.5);
-        outerGlow.addColorStop(0, `hsla(${this.hue}, 100%, 60%, 0.3)`);
-        outerGlow.addColorStop(0.4, `hsla(${this.hue}, 100%, 50%, 0.1)`);
-        outerGlow.addColorStop(1, `hsla(${this.hue}, 100%, 40%, 0)`);
-        ctx.fillStyle = outerGlow;
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(0, 0, drawR, 0, Math.PI * 2);
-        const bodyGrad = ctx.createRadialGradient(
-          -drawR * 0.3, -drawR * 0.3, drawR * 0.1,
-          0, 0, drawR
-        );
-        bodyGrad.addColorStop(0, `hsla(${this.hue}, 80%, 90%, 1)`);
-        bodyGrad.addColorStop(0.3, `hsla(${this.hue}, 100%, 65%, 0.95)`);
-        bodyGrad.addColorStop(0.7, `hsla(${(this.hue + 30) % 360}, 100%, 45%, 0.9)`);
-        bodyGrad.addColorStop(1, `hsla(${(this.hue + 60) % 360}, 100%, 25%, 0.8)`);
-        ctx.fillStyle = bodyGrad;
-        ctx.fill();
-
-        ctx.beginPath();
-        ctx.arc(-drawR * 0.25, -drawR * 0.25, drawR * 0.4, 0, Math.PI * 2);
-        const specGrad = ctx.createRadialGradient(
-          -drawR * 0.25, -drawR * 0.25, 0,
-          -drawR * 0.25, -drawR * 0.25, drawR * 0.4
-        );
-        specGrad.addColorStop(0, 'rgba(255, 255, 255, 0.7)');
-        specGrad.addColorStop(0.5, 'rgba(255, 255, 255, 0.1)');
-        specGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-        ctx.fillStyle = specGrad;
-        ctx.fill();
+        const glowR = drawR * 2.5;
+        ctx.drawImage(glowSprite(this.hue), -glowR, -glowR, glowR * 2, glowR * 2);
+        ctx.drawImage(ballSprite(this.hue), -drawR, -drawR, drawR * 2, drawR * 2);
 
         ctx.restore();
       }
@@ -620,16 +687,12 @@
 
       draw() {
         const alpha = Math.max(0, this.life / this.maxLife);
-        const size = this.r * alpha;
+        const size = this.r * alpha * 3;
+        if (size < 0.3) return;
 
-        ctx.beginPath();
-        ctx.arc(this.x, this.y, size * 3, 0, Math.PI * 2);
-        const g = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, size * 3);
-        g.addColorStop(0, `hsla(${this.hue}, 100%, 80%, ${alpha * 0.8})`);
-        g.addColorStop(0.3, `hsla(${this.hue}, 100%, 60%, ${alpha * 0.3})`);
-        g.addColorStop(1, `hsla(${this.hue}, 100%, 40%, 0)`);
-        ctx.fillStyle = g;
-        ctx.fill();
+        ctx.globalAlpha = alpha;
+        ctx.drawImage(particleSprite(this.hue), this.x - size, this.y - size, size * 2, size * 2);
+        ctx.globalAlpha = 1;
       }
     }
 
@@ -660,13 +723,12 @@
         ctx.lineWidth = 2 * alpha;
         ctx.stroke();
 
-        ctx.beginPath();
-        ctx.arc(this.x, this.y, this.radius * 0.6, 0, Math.PI * 2);
-        const rg = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.radius * 0.6);
-        rg.addColorStop(0, `hsla(${this.hue}, 100%, 80%, ${alpha * 0.15})`);
-        rg.addColorStop(1, `hsla(${this.hue}, 100%, 50%, 0)`);
-        ctx.fillStyle = rg;
-        ctx.fill();
+        const fr = this.radius * 0.6;
+        if (fr > 0.5) {
+          ctx.globalAlpha = alpha;
+          ctx.drawImage(impactSprite(this.hue), this.x - fr, this.y - fr, fr * 2, fr * 2);
+          ctx.globalAlpha = 1;
+        }
       }
     }
 
@@ -845,12 +907,7 @@
     function drawBackground() {
       ctx.fillStyle = '#050508';
       ctx.fillRect(0, 0, W, H);
-
-      const vignette = ctx.createRadialGradient(W / 2, H / 2, W * 0.2, W / 2, H / 2, W * 0.8);
-      vignette.addColorStop(0, 'rgba(5, 5, 8, 0)');
-      vignette.addColorStop(1, 'rgba(0, 0, 0, 0.5)');
-      ctx.fillStyle = vignette;
-      ctx.fillRect(0, 0, W, H);
+      ctx.drawImage(vignette, 0, 0, W, H);
     }
 
     function updateAndDrawStageBall() {
@@ -997,7 +1054,7 @@
                 const cy = (a.y + b.y) / 2;
                 const mixHue = (a.hue + b.hue) / 2;
                 impacts.push(new Impact(cx, cy, mixHue, impactStrength * 0.5));
-                const count = Math.min(Math.floor(impactStrength * 1.5), 20);
+                const count = strained ? 0 : Math.round(Math.min(Math.floor(impactStrength * 1.5), 20) * PARTICLE_SCALE);
                 for (let k = 0; k < count; k++) {
                   const angle = Math.random() * Math.PI * 2;
                   const speed = impactStrength * (0.2 + Math.random() * 0.5);
@@ -1064,6 +1121,12 @@
       lastTime = now;
       const steps = Math.min(Math.round(elapsed / FIXED_DT), 4);
 
+      // Rolling frame-time average drives graceful degradation: thin trails
+      // and stop spawning particles while strained, instead of spiraling.
+      frameAvg += (Math.min(elapsed, 100) - frameAvg) * 0.05;
+      strained = frameAvg > 24;
+      trailStride = (MOBILE ? 2 : 1) * (strained ? 2 : 1);
+
       frame++;
 
       if (frozen) {
@@ -1103,7 +1166,10 @@
       for (const ball of balls) ball.draw();
 
       if (frozen && frozenBall) {
-        const progress = Math.min((now - frozenStart) / FREEZE_DURATION, 1);
+        // Clamp low end too: the rAF timestamp can lag the performance.now()
+        // captured in the mouseup handler, and a negative progress turns
+        // Math.pow(progress, 0.5) into NaN, which kills the render loop.
+        const progress = Math.min(Math.max((now - frozenStart) / FREEZE_DURATION, 0), 1);
         drawFrozenBall(progress);
         if (progress >= 1) {
           frozen = false;
@@ -1119,13 +1185,14 @@
 
       ctx.restore();
 
+      const fpsLine = `fps      ${(1000 / Math.max(frameAvg, 1)).toFixed(0)}${strained ? ' !' : ''}\n`;
       if (stageBall && dragStart && dragCurrent) {
         const dx = dragStart.x - dragCurrent.x;
         const dy = dragStart.y - dragCurrent.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
         const v = dist * 0.05 + Math.pow(dist / 1000, 15) * 100000;
         const i = Math.pow(dist * 0.15 / 50, 2.5);
-        debug.textContent =
+        debug.textContent = fpsLine +
           `pos      ${stageBall.x.toFixed(1)}, ${stageBall.y.toFixed(1)}\n` +
           `vel      ${v.toFixed(2)}\n` +
           `intensity ${i.toFixed(3)}\n` +
@@ -1134,7 +1201,7 @@
       } else if (balls.length > 0) {
         const b = balls[balls.length - 1];
         const v = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
-        debug.textContent =
+        debug.textContent = fpsLine +
           `pos      ${b.x.toFixed(1)}, ${b.y.toFixed(1)}\n` +
           `vel      ${v.toFixed(2)}  (${b.vx.toFixed(2)}, ${b.vy.toFixed(2)})\n` +
           `hue      ${b.hue.toFixed(0)}\n` +
@@ -1142,7 +1209,7 @@
           `age      ${b.age}\n` +
           `balls    ${balls.length}/${MAX_BALLS}`;
       } else {
-        debug.textContent = `balls    0/${MAX_BALLS}`;
+        debug.textContent = fpsLine + `balls    0/${MAX_BALLS}`;
       }
 
       requestAnimationFrame(loop);
