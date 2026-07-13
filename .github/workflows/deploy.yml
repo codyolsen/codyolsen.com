@@ -24,9 +24,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The Blowfish fork uses template fields newer than mid-2025 Hugo
+      # (e.g. Language.Locale) — track latest. To pin instead, run
+      # `hugo version` locally and put that version here.
       - uses: peaceiris/actions-hugo@v3
         with:
-          hugo-version: "0.148.2"
+          hugo-version: "latest"
           extended: true
 
       - name: Build site
