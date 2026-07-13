@@ -555,6 +555,18 @@
         this.vy += GRAVITY;
         this.vx *= FRICTION;
         this.vy *= FRICTION;
+
+        // Cap speed to a fraction of the viewport: beyond this a ball crosses
+        // the arena in under a frame and just clamps corner-to-corner,
+        // looking stuck until bounce decay catches up.
+        const cap = Math.min(W, H) * 0.1;
+        const sp = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+        if (sp > cap) {
+          const k = cap / sp;
+          this.vx *= k;
+          this.vy *= k;
+        }
+
         this.x += this.vx;
         this.y += this.vy;
         this.spin += this.vx * 0.02;
