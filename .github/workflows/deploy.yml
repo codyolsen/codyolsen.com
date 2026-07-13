@@ -30,7 +30,14 @@ jobs:
           extended: true
 
       - name: Build site
-        run: hugo --gc --minify -b https://codyolsen.com/
+        env:
+          # The Blowfish theme resolves from the private fork
+          # github.com/codyolsen/blowfish (see the replace in go.mod), so Go
+          # must fetch it over authenticated git instead of the public proxy.
+          GOPRIVATE: github.com/codyolsen/*
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.GH_MODULES_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          hugo --gc --minify -b https://codyolsen.com/
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
