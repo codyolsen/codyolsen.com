@@ -1,2 +1,26 @@
 [[imports]]
 path = "github.com/nunocoracao/blowfish/v2"
+
+[[imports.mounts]]
+source = "assets"
+target = "assets"
+
+[[imports.mounts]]
+source = "layouts"
+target = "layouts"
+
+[[imports.mounts]]
+source = "static"
+target = "static"
+
+[[imports.mounts]]
+source = "archetypes"
+target = "archetypes"
+
+[[imports.mounts]]
+source = "i18n"
+target = "i18n"
+
+[[imports.mounts]]
+source = "data"
+target = "data"
