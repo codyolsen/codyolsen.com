@@ -43,7 +43,10 @@ jobs:
           hugo --gc --minify -b https://codyolsen.com/
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v5
+        # Pinned to a main-branch SHA: every tagged release (through v5.1.1)
+        # still declares node20 and triggers the deprecation warning; main
+        # moved to node24 on 2026-07-09. Re-pin to a tag once one ships node24.
+        uses: aws-actions/configure-aws-credentials@9ae780b171afa8c5a3a6a2d154a765b709492482
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
