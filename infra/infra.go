@@ -39,10 +39,26 @@ func NewInfraStack(scope constructs.Construct, id string, props *InfraStackProps
 		Validation:              awscertificatemanager.CertificateValidation_FromDns(nil),
 	})
 
+	gameRouting := awscloudfront.NewFunction(stack, jsii.String("GameRouting"), &awscloudfront.FunctionProps{
+		Code: awscloudfront.FunctionCode_FromInline(jsii.String(`function handler(event) {
+    var request = event.request;
+    if (request.uri === '/game' || request.uri === '/game/') {
+        request.uri = '/game/index.html';
+    }
+    return request;
+}`)),
+	})
+
 	distribution := awscloudfront.NewDistribution(stack, jsii.String("SiteDistribution"), &awscloudfront.DistributionProps{
 		DefaultBehavior: &awscloudfront.BehaviorOptions{
 			Origin:               awscloudfrontorigins.S3BucketOrigin_WithOriginAccessControl(bucket, &awscloudfrontorigins.S3BucketOriginWithOACProps{}),
 			ViewerProtocolPolicy: awscloudfront.ViewerProtocolPolicy_REDIRECT_TO_HTTPS,
+			FunctionAssociations: &[]*awscloudfront.FunctionAssociation{
+				{
+					EventType: awscloudfront.FunctionEventType_VIEWER_REQUEST,
+					Function:  gameRouting,
+				},
+			},
 		},
 		DomainNames:       jsii.Strings(domainName, "www."+domainName),
 		Certificate:       cert,

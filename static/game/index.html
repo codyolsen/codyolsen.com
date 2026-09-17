@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>codyolsen.com</title>
+  <link rel="stylesheet" href="/game/css/game.css">
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="greet">Sound on...</div>
+  <div class="hint" id="hint">click &amp; drag to launch</div>
+  <div id="debug"></div>
+  <div id="sliders">
+    <label><span>gravity</span><input type="range" id="sl-gravity" min="0" max="100" value="8"><span class="val" id="val-gravity">0.08</span></label>
+    <label><span>bounce</span><input type="range" id="sl-bounce" min="0" max="100" value="92"><span class="val" id="val-bounce">0.92</span></label>
+    <label><span>friction</span><input type="range" id="sl-friction" min="0" max="100" value="70"><span class="val" id="val-friction">0.997</span></label>
+  </div>
+
+  <script src="/game/js/game.js"></script>
+</body>
+</html>
